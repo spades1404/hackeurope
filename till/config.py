@@ -15,7 +15,7 @@ load_dotenv()
 EXTRACTION_MODEL = os.getenv("EXTRACTION_MODEL", "gemini/gemini-2.0-flash")
 
 # Used for: generating Gmail search queries from transaction data
-SEARCH_QUERY_MODEL = os.getenv("SEARCH_QUERY_MODEL", "gemini/gemini-2.0-flash")
+SEARCH_QUERY_MODEL = os.getenv("SEARCH_QUERY_MODEL", "anthropic/claude-haiku-4-5-20251001")
 
 # --- API Keys ---
 # LiteLLM picks these up automatically based on the provider prefix

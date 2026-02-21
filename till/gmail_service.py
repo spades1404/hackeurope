@@ -240,26 +240,32 @@ def _scan_for_pdf(
     Gmail URL-safe base64 is converted to standard base64 for inline data.
     """
     parts = payload.get("parts", [])
-    parts_to_check = [payload] + parts
 
-    for part in parts_to_check:
+    if not parts:
+        # Single-part message — check the payload itself
+        filename = payload.get("filename", "")
+        if filename.lower().endswith(".pdf"):
+            body = payload.get("body", {})
+            attachment_id = body.get("attachmentId")
+            if attachment_id:
+                return filename, attachment_id, None
+            inline_data = body.get("data")
+            if inline_data:
+                return filename, None, inline_data.replace("-", "+").replace("_", "/")
+        return None
+
+    # Multipart message — check direct children, then recurse into nested multiparts
+    for part in parts:
         filename = part.get("filename", "")
-
         if filename.lower().endswith(".pdf"):
             body = part.get("body", {})
             attachment_id = body.get("attachmentId")
-
             if attachment_id:
-                # Large attachment — needs attachments.get() later
                 return filename, attachment_id, None
-
             inline_data = body.get("data")
             if inline_data:
-                # Small inline attachment — already available
-                standard_b64 = inline_data.replace("-", "+").replace("_", "/")
-                return filename, None, standard_b64
+                return filename, None, inline_data.replace("-", "+").replace("_", "/")
 
-        # Recurse into nested multipart
         if part.get("parts"):
             result = _scan_for_pdf(part)
             if result:
@@ -269,7 +275,15 @@ def _scan_for_pdf(
 
 
 def _parse_email_date(date_str: str) -> datetime:
-    """Parse Gmail date header into datetime."""
+    """Parse Gmail date header into datetime.
+
+    Strips parenthetical timezone comments like '(PST)' or '(UTC)' that
+    Gmail occasionally appends after the numeric offset.
+    """
+    import re
+    # Remove trailing parenthetical e.g. " (PST)", " (UTC+1)"
+    cleaned = re.sub(r"\s*\([^)]*\)\s*$", "", date_str.strip())
+
     formats = [
         "%a, %d %b %Y %H:%M:%S %z",
         "%d %b %Y %H:%M:%S %z",
@@ -278,7 +292,7 @@ def _parse_email_date(date_str: str) -> datetime:
     ]
     for fmt in formats:
         try:
-            return datetime.strptime(date_str.strip(), fmt)
+            return datetime.strptime(cleaned, fmt)
         except ValueError:
             continue
 
