@@ -1,3 +1,4 @@
+<<<<<<< Updated upstream
 *.pyc
 *.env
 node_modules/
@@ -5,3 +6,7 @@ node_modules/
 dist/
 dist-ssr/
 *.local
+=======
+/backend/__pycache__
+.env
+>>>>>>> Stashed changes
