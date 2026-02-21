@@ -38,6 +38,16 @@ CONFIDENCE_THRESHOLD_AUTO = float(os.getenv("CONFIDENCE_THRESHOLD_AUTO", "0.85")
 CONFIDENCE_THRESHOLD_REVIEW = float(os.getenv("CONFIDENCE_THRESHOLD_REVIEW", "0.50"))
 DATE_WINDOW_DAYS = int(os.getenv("DATE_WINDOW_DAYS", "30"))
 
+# --- OCR Loop ---
+# Stop running OCR on further candidates once this confidence is reached
+OCR_CONFIDENCE_TARGET = float(os.getenv("OCR_CONFIDENCE_TARGET", "0.90"))
+# Maximum number of candidates to run OCR on per transaction
+MAX_OCR_CANDIDATES = int(os.getenv("MAX_OCR_CANDIDATES", "3"))
+# How many emails to fetch metadata for per search
+MAX_SEARCH_RESULTS = int(os.getenv("MAX_SEARCH_RESULTS", "10"))
+# Skip OCR for candidates whose pre-filter score is below this
+PRE_FILTER_MIN_SCORE = float(os.getenv("PRE_FILTER_MIN_SCORE", "0.15"))
+
 # --- Server ---
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8001"))

@@ -1,6 +1,12 @@
 """Gmail API integration: search for emails and download PDF attachments.
 
-Handles OAuth2 authentication, email search, and PDF extraction.
+Handles OAuth2 authentication, email metadata scanning, and deferred PDF download.
+
+Flow:
+1. find_invoice_candidates()  — searches Gmail, fetches metadata for all results
+                                 (no PDF content downloaded yet)
+2. Caller scores candidates via pre_filter_score() (in matching_engine)
+3. download_pdf_for_candidate() — downloads PDF only for the chosen candidate
 """
 
 import base64
@@ -8,7 +14,7 @@ import logging
 import os
 from datetime import datetime
 
-from models.schemas import EmailInvoice
+from schemas import EmailCandidate, EmailInvoice
 import config
 
 logger = logging.getLogger(__name__)
@@ -57,8 +63,8 @@ class GmailService:
         if not self.service:
             self.authenticate()
 
-    def search_emails(self, query: str, max_results: int = 5) -> list[dict]:
-        """Search Gmail and return message metadata.
+    def search_emails(self, query: str, max_results: int = 10) -> list[dict]:
+        """Search Gmail and return message ID list (no content fetched).
 
         Args:
             query: Gmail search query string
@@ -80,110 +86,186 @@ class GmailService:
         logger.info(f"Gmail search '{query}' → {len(messages)} results")
         return messages
 
-    def get_email_with_pdf(self, message_id: str) -> EmailInvoice | None:
-        """Fetch a single email and extract the first PDF attachment.
+    def get_email_metadata(self, message_id: str) -> EmailCandidate | None:
+        """Fetch email headers and check for PDF presence — no attachment download.
+
+        Uses format='full' to get the full MIME structure so we can detect PDF
+        attachments and store their attachment IDs for deferred download.
+        Inline (small) PDFs are stored directly in the candidate so no second
+        fetch is needed later.
 
         Args:
             message_id: Gmail message ID
 
         Returns:
-            EmailInvoice with PDF base64 data, or None if no PDF found
+            EmailCandidate with metadata and PDF info, or None on error
         """
         self._ensure_authenticated()
 
-        msg = (
-            self.service.users()
-            .messages()
-            .get(userId="me", id=message_id, format="full")
-            .execute()
-        )
+        try:
+            msg = (
+                self.service.users()
+                .messages()
+                .get(userId="me", id=message_id, format="full")
+                .execute()
+            )
+        except Exception as e:
+            logger.warning(f"Failed to fetch metadata for message {message_id}: {e}")
+            return None
 
-        # Extract headers
         headers = {h["name"]: h["value"] for h in msg["payload"]["headers"]}
         email_from = headers.get("From", "")
         email_subject = headers.get("Subject", "")
         email_date_str = headers.get("Date", "")
-
-        # Parse date (Gmail dates vary in format)
         email_date = _parse_email_date(email_date_str)
 
-        # Find PDF attachment in message parts
-        pdf_data = self._find_pdf_attachment(msg["payload"], message_id)
+        # Scan MIME structure for a PDF — store IDs but don't download yet
+        pdf_info = _scan_for_pdf(msg["payload"])
 
-        if not pdf_data:
-            logger.debug(f"No PDF attachment in email {message_id}")
-            return None
-
-        filename, pdf_base64 = pdf_data
-
-        return EmailInvoice(
+        return EmailCandidate(
             email_id=message_id,
             email_from=email_from,
             email_subject=email_subject,
             email_date=email_date,
-            filename=filename,
+            has_pdf=pdf_info is not None,
+            pdf_filename=pdf_info[0] if pdf_info else None,
+            pdf_attachment_id=pdf_info[1] if pdf_info else None,
+            pdf_inline_data=pdf_info[2] if pdf_info else None,
+        )
+
+    def download_pdf_for_candidate(self, candidate: EmailCandidate) -> EmailInvoice | None:
+        """Download the PDF for a pre-screened candidate.
+
+        If the PDF was small enough to be stored inline in the metadata scan,
+        no additional API call is made.  Otherwise, calls attachments.get().
+
+        Args:
+            candidate: An EmailCandidate returned by get_email_metadata()
+
+        Returns:
+            EmailInvoice with pdf_base64 populated, or None if PDF unavailable
+        """
+        if not candidate.has_pdf:
+            logger.debug(f"Candidate {candidate.email_id} has no PDF — skipping download")
+            return None
+
+        self._ensure_authenticated()
+
+        if candidate.pdf_inline_data:
+            # Already available from the metadata scan — no extra API call
+            pdf_base64 = candidate.pdf_inline_data
+        elif candidate.pdf_attachment_id:
+            try:
+                attachment = (
+                    self.service.users()
+                    .messages()
+                    .attachments()
+                    .get(
+                        userId="me",
+                        messageId=candidate.email_id,
+                        id=candidate.pdf_attachment_id,
+                    )
+                    .execute()
+                )
+                raw_b64 = attachment["data"]
+                pdf_base64 = raw_b64.replace("-", "+").replace("_", "/")
+            except Exception as e:
+                logger.warning(
+                    f"Failed to download attachment for {candidate.email_id}: {e}"
+                )
+                return None
+        else:
+            logger.warning(
+                f"Candidate {candidate.email_id} has_pdf=True but no attachment_id or inline data"
+            )
+            return None
+
+        return EmailInvoice(
+            email_id=candidate.email_id,
+            email_from=candidate.email_from,
+            email_subject=candidate.email_subject,
+            email_date=candidate.email_date,
+            filename=candidate.pdf_filename or "invoice.pdf",
             pdf_base64=pdf_base64,
         )
 
-    def _find_pdf_attachment(self, payload: dict, message_id: str) -> tuple[str, str] | None:
-        """Recursively search message parts for a PDF attachment.
+    def find_invoice_candidates(
+        self, query: str, max_results: int | None = None
+    ) -> list[EmailCandidate]:
+        """Search Gmail and return metadata for all matching emails.
 
-        Returns (filename, base64_data) or None.
+        This is the main entry point used by the reconciliation agent.
+        No PDFs are downloaded — callers should score candidates first, then
+        call download_pdf_for_candidate() only for promising ones.
+
+        Args:
+            query: Gmail search query
+            max_results: Override config.MAX_SEARCH_RESULTS
+
+        Returns:
+            List of EmailCandidate objects, ordered by Gmail relevance rank.
+            Candidates without a PDF attachment are included (with has_pdf=False)
+            so callers have full visibility, but they will score low.
         """
-        parts = payload.get("parts", [])
+        n = max_results or config.MAX_SEARCH_RESULTS
+        messages = self.search_emails(query, max_results=n)
 
-        # Also check the payload itself (for single-part messages)
-        parts_to_check = [payload] + parts
-
-        for part in parts_to_check:
-            filename = part.get("filename", "")
-
-            if filename.lower().endswith(".pdf"):
-                attachment_id = part.get("body", {}).get("attachmentId")
-
-                if attachment_id:
-                    # Download attachment data
-                    attachment = (
-                        self.service.users()
-                        .messages()
-                        .attachments()
-                        .get(userId="me", messageId=message_id, id=attachment_id)
-                        .execute()
-                    )
-                    # Gmail uses URL-safe base64 — convert to standard
-                    raw_b64 = attachment["data"]
-                    raw_b64 = raw_b64.replace("-", "+").replace("_", "/")
-                    return filename, raw_b64
-
-                elif part.get("body", {}).get("data"):
-                    # Small attachments might be inline
-                    raw_b64 = part["body"]["data"]
-                    raw_b64 = raw_b64.replace("-", "+").replace("_", "/")
-                    return filename, raw_b64
-
-            # Recurse into nested parts (multipart messages)
-            if part.get("parts"):
-                result = self._find_pdf_attachment(part, message_id)
-                if result:
-                    return result
-
-        return None
-
-    def find_invoice_email(self, query: str) -> EmailInvoice | None:
-        """Search Gmail and return the top matching email with a PDF attachment.
-
-        This is the main method used by the reconciliation agent.
-        Searches, then iterates results until one with a PDF is found.
-        """
-        messages = self.search_emails(query, max_results=5)
-
+        candidates = []
         for msg_meta in messages:
-            invoice_email = self.get_email_with_pdf(msg_meta["id"])
-            if invoice_email:
-                return invoice_email
+            candidate = self.get_email_metadata(msg_meta["id"])
+            if candidate:
+                candidates.append(candidate)
 
-        logger.info(f"No email with PDF found for query: {query}")
-        return None
+        pdf_count = sum(1 for c in candidates if c.has_pdf)
+        logger.info(
+            f"Metadata scan complete: {len(candidates)} emails, {pdf_count} with PDF"
+        )
+        return candidates
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _scan_for_pdf(
+    payload: dict,
+) -> tuple[str, str | None, str | None] | None:
+    """Recursively scan MIME parts for a PDF attachment.
+
+    Returns (filename, attachment_id_or_None, inline_base64_or_None),
+    or None if no PDF found.
+
+    attachment_id is set for large attachments that need a separate download.
+    inline_base64 is set for small attachments already embedded in the message.
+    Gmail URL-safe base64 is converted to standard base64 for inline data.
+    """
+    parts = payload.get("parts", [])
+    parts_to_check = [payload] + parts
+
+    for part in parts_to_check:
+        filename = part.get("filename", "")
+
+        if filename.lower().endswith(".pdf"):
+            body = part.get("body", {})
+            attachment_id = body.get("attachmentId")
+
+            if attachment_id:
+                # Large attachment — needs attachments.get() later
+                return filename, attachment_id, None
+
+            inline_data = body.get("data")
+            if inline_data:
+                # Small inline attachment — already available
+                standard_b64 = inline_data.replace("-", "+").replace("_", "/")
+                return filename, None, standard_b64
+
+        # Recurse into nested multipart
+        if part.get("parts"):
+            result = _scan_for_pdf(part)
+            if result:
+                return result
+
+    return None
 
 
 def _parse_email_date(date_str: str) -> datetime:
@@ -200,5 +282,5 @@ def _parse_email_date(date_str: str) -> datetime:
         except ValueError:
             continue
 
-    logger.warning(f"Could not parse email date: {date_str}")
+    logger.warning(f"Could not parse email date: {date_str!r}")
     return datetime.now()

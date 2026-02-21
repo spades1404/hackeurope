@@ -1,11 +1,16 @@
 """Generate Gmail search queries from transaction data using an LLM.
 
 The LLM gets the transaction fields and produces a structured Gmail search query
-optimized for finding the matching invoice email.
+optimised for finding the matching invoice email.
+
+Two public functions:
+- build_search_query()        — primary query (specific, uses from: filter)
+- build_broad_fallback_query()— wider query used when the primary returns 0 results
 """
 
 import json
 import logging
+import re
 
 import litellm
 
@@ -13,22 +18,21 @@ import config
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are a Gmail search query generator for a German tax advisory tool.
+SYSTEM_PROMPT = """You are a Gmail search query generator for an invoice reconciliation tool.
 
-Given a bank transaction, you generate a Gmail search query to find the email 
-containing the matching invoice PDF.
+Given a bank transaction, generate a Gmail search query to find the email containing
+the matching invoice or receipt PDF.
 
 Rules for Gmail search syntax:
-- Use "from:" to filter by sender (if you can infer the vendor's email domain)
-- Use "has:attachment" to ensure PDF attachments
-- Use "filename:pdf" to filter for PDF files
-- Use "after:" and "before:" for date range (format: YYYY/MM/DD)
-- Use keywords from the vendor name (but keep it simple — 1-2 key words)
-- Do NOT use quotes around multi-word "from:" values
-- Keep queries short and broad enough to catch the email — too specific risks missing it
-
-The date range should cover from 30 days before the transaction date to the transaction date,
-since invoices are typically sent before payment.
+- ALWAYS include has:attachment and filename:pdf
+- Use "from:" to filter by the vendor's likely email domain when you can infer it
+  e.g. for "Stripe" use from:stripe.com, for "Amazon Web Services" use from:amazon.com
+  If you cannot confidently infer the domain, omit the from: filter
+- Use "after:" and "before:" for a date range (format: YYYY/MM/DD)
+  The range should cover 30 days before the transaction date up to the transaction date
+- Use 1-2 keywords from the vendor name only if there is no reliable from: filter
+- Keep the query broad enough to catch the email — too specific risks missing it
+- Do NOT use quotes around the from: value
 
 Return ONLY a JSON object with this exact structure, no markdown:
 {
@@ -42,7 +46,7 @@ USER_PROMPT_TEMPLATE = """Generate a Gmail search query for this bank transactio
 - Amount: {amount} {currency}
 - Counterparty: {counterparty_name}
 - IBAN: {iban}
-- Reference (Verwendungszweck): {reference}
+- Reference: {reference}
 
 Return the JSON object with the query."""
 
@@ -98,13 +102,54 @@ def build_search_query(
 
     except json.JSONDecodeError as e:
         logger.warning(f"LLM returned invalid JSON, falling back to deterministic query: {e}")
-        return _fallback_query(transaction_date, counterparty_name)
+        return _deterministic_query(transaction_date, counterparty_name)
     except Exception as e:
         logger.error(f"LLM search query generation failed: {e}")
-        return _fallback_query(transaction_date, counterparty_name)
+        return _deterministic_query(transaction_date, counterparty_name)
 
 
-def _fallback_query(transaction_date: str, counterparty_name: str) -> dict:
+def build_broad_fallback_query(counterparty_name: str) -> dict:
+    """Generate a wider fallback query when the primary query returns 0 results.
+
+    Drops the date filter and the from: constraint, keeping only the vendor
+    keywords and attachment filter so we cast a wider net.
+    """
+    key_words = _key_name_words(counterparty_name, max_words=1)
+    name_query = key_words[0] if key_words else counterparty_name.split()[0]
+
+    query = f"{name_query} has:attachment filename:pdf"
+
+    logger.info(f"Broad fallback query for '{counterparty_name}': {query}")
+    return {
+        "query": query,
+        "reasoning": "Broad fallback: no date range, no from: filter — wider net",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+# Words to strip from company names when building keyword queries
+_STOP_WORDS = {
+    # English entity suffixes
+    "llc", "ltd", "limited", "inc", "incorporated", "corp", "corporation",
+    "plc", "llp", "lp", "co", "company", "group", "holdings", "international",
+    # German entity suffixes
+    "gmbh", "ag", "kg", "ohg", "ug", "mbh",
+    # Filler
+    "the", "and", "&", "of", "for",
+}
+
+
+def _key_name_words(name: str, max_words: int = 2) -> list[str]:
+    """Extract the most meaningful words from a company name."""
+    tokens = re.findall(r"[a-zA-Z0-9]+", name)
+    meaningful = [w for w in tokens if w.lower() not in _STOP_WORDS and len(w) > 1]
+    return meaningful[:max_words]
+
+
+def _deterministic_query(transaction_date: str, counterparty_name: str) -> dict:
     """Deterministic fallback if LLM fails."""
     from datetime import datetime, timedelta
 
@@ -112,15 +157,12 @@ def _fallback_query(transaction_date: str, counterparty_name: str) -> dict:
     after_date = (txn_date - timedelta(days=30)).strftime("%Y/%m/%d")
     before_date = (txn_date + timedelta(days=1)).strftime("%Y/%m/%d")
 
-    # Take first meaningful word from counterparty name
-    words = counterparty_name.split()
-    stop_words = {"gmbh", "ag", "kg", "ohg", "ug", "e.k.", "mbh", "co.", "&", "und", "the"}
-    key_words = [w for w in words if w.lower().strip(".,") not in stop_words][:2]
+    key_words = _key_name_words(counterparty_name, max_words=2)
     name_query = " ".join(key_words) if key_words else counterparty_name.split()[0]
 
     query = f"{name_query} has:attachment filename:pdf after:{after_date} before:{before_date}"
 
     return {
         "query": query,
-        "reasoning": "Fallback: deterministic query using vendor name keywords and date range",
+        "reasoning": "Deterministic fallback: vendor keywords + date range",
     }
