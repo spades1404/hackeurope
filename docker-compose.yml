@@ -1,0 +1,40 @@
+version: "3.9"
+
+services:
+  tunatax:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tunatax
+    ports:
+      - "8000:8000"
+    environment:
+      # ── LLM Provider (pick one) ──────────────────
+      - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
+      - LLM_MODEL=${LLM_MODEL:-ollama/gemma3:12b}
+      - LLM_VISION_MODEL=${LLM_VISION_MODEL:-ollama/llama3.2-vision:11b}
+
+      # ── Ollama (self-hosted) ─────────────────────
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - OLLAMA_AUTH_USER=${OLLAMA_AUTH_USER:-}
+      - OLLAMA_AUTH_PASS=${OLLAMA_AUTH_PASS:-}
+
+      # ── Cloud providers (optional) ───────────────
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+
+      # ── Scheduler ────────────────────────────────
+      - SCHEDULER_INTERVAL=${SCHEDULER_INTERVAL:-300}
+      - AUTO_GENERATE_DAYS=${AUTO_GENERATE_DAYS:-30}
+
+      # ── Database ─────────────────────────────────
+      - DATABASE_PATH=/app/db/tunatax.db
+    volumes:
+      # Persist SQLite database across container restarts
+      - tunatax-data:/app/db
+      - tunatax-docs:/app/generated_docs
+    restart: unless-stopped
+
+volumes:
+  tunatax-data:
+  tunatax-docs:

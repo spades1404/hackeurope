@@ -1,0 +1,224 @@
+{
+  "jurisdictions": {
+    "US": {
+      "country_name": "United States",
+      "currency": "USD",
+      "tax_authority": "Internal Revenue Service (IRS)",
+      "obligations": [
+        {
+          "id": "US-CIT",
+          "name": "Corporate Income Tax Return",
+          "form": "Form 1120",
+          "description": "Annual federal corporate income tax return for C corporations",
+          "frequency": "annual",
+          "due_month": 4,
+          "due_day": 15,
+          "applies_to": ["c_corp"],
+          "penalty_for_late_filing": "5% of unpaid tax per month, up to 25%",
+          "required_data": ["gross_revenue", "cost_of_goods_sold", "operating_expenses", "deductions", "tax_credits"],
+          "output_type": "tax_return",
+          "tax_rate": 0.21
+        },
+        {
+          "id": "US-SCT",
+          "name": "S Corporation Income Tax Return",
+          "form": "Form 1120-S",
+          "description": "Annual federal income tax return for S corporations",
+          "frequency": "annual",
+          "due_month": 3,
+          "due_day": 15,
+          "applies_to": ["s_corp"],
+          "penalty_for_late_filing": "$220 per month per shareholder",
+          "required_data": ["gross_revenue", "cost_of_goods_sold", "operating_expenses", "deductions"],
+          "output_type": "tax_return",
+          "tax_rate": 0.0
+        },
+        {
+          "id": "US-EST",
+          "name": "Estimated Corporate Income Tax",
+          "form": "Form 1120-W",
+          "description": "Quarterly estimated tax payments",
+          "frequency": "quarterly",
+          "quarterly_dates": [
+            {"quarter": "Q1", "due_month": 4, "due_day": 15},
+            {"quarter": "Q2", "due_month": 6, "due_day": 15},
+            {"quarter": "Q3", "due_month": 9, "due_day": 15},
+            {"quarter": "Q4", "due_month": 12, "due_day": 15}
+          ],
+          "applies_to": ["c_corp", "s_corp"],
+          "penalty_for_late_filing": "Underpayment penalty based on federal short-term rate",
+          "required_data": ["estimated_net_income"],
+          "output_type": "payment_voucher",
+          "tax_rate": 0.21
+        },
+        {
+          "id": "US-PAYROLL",
+          "name": "Employer's QUARTERLY Federal Tax Return",
+          "form": "Form 941",
+          "description": "Quarterly report of wages paid and taxes withheld",
+          "frequency": "quarterly",
+          "quarterly_dates": [
+            {"quarter": "Q1", "due_month": 4, "due_day": 30},
+            {"quarter": "Q2", "due_month": 7, "due_day": 31},
+            {"quarter": "Q3", "due_month": 10, "due_day": 31},
+            {"quarter": "Q4", "due_month": 1, "due_day": 31}
+          ],
+          "applies_to": ["c_corp", "s_corp", "llc"],
+          "penalty_for_late_filing": "2% to 15% of unpaid amounts",
+          "required_data": ["total_wages", "federal_income_tax_withheld", "social_security_tax", "medicare_tax"],
+          "output_type": "payroll_return",
+          "tax_rate": 0.153
+        },
+        {
+          "id": "US-SALT",
+          "name": "State Sales Tax Return",
+          "form": "State Specific",
+          "description": "Monthly or quarterly sales tax remittance depending on volume",
+          "frequency": "monthly",
+          "applies_to": ["c_corp", "s_corp", "llc"],
+          "penalty_for_late_filing": "Varies by state",
+          "required_data": ["gross_sales", "taxable_sales", "exempt_sales", "tax_collected"],
+          "output_type": "sales_tax_return",
+          "tax_rate": 0.08
+        }
+      ]
+    },
+    "UK": {
+      "country_name": "United Kingdom",
+      "currency": "GBP",
+      "tax_authority": "HM Revenue & Customs (HMRC)",
+      "obligations": [
+        {
+          "id": "UK-CT",
+          "name": "Corporation Tax Return",
+          "form": "CT600",
+          "description": "Annual corporation tax return",
+          "frequency": "annual",
+          "due_month": 12,
+          "due_day": 31,
+          "applies_to": ["ltd", "plc"],
+          "penalty_for_late_filing": "£100 initial penalty, escalating with delay",
+          "required_data": ["turnover", "cost_of_sales", "trading_profits", "capital_allowances"],
+          "output_type": "tax_return",
+          "tax_rate": 0.25
+        },
+        {
+          "id": "UK-VAT",
+          "name": "Value Added Tax Return",
+          "form": "VAT100",
+          "description": "Standard quarterly VAT return",
+          "frequency": "quarterly",
+          "quarterly_dates": [
+            {"quarter": "Q1", "due_month": 5, "due_day": 7},
+            {"quarter": "Q2", "due_month": 8, "due_day": 7},
+            {"quarter": "Q3", "due_month": 11, "due_day": 7},
+            {"quarter": "Q4", "due_month": 2, "due_day": 7}
+          ],
+          "applies_to": ["ltd", "plc", "llp"],
+          "penalty_for_late_filing": "Surcharge based on amount owed",
+          "required_data": ["total_sales", "output_vat", "total_purchases", "input_vat"],
+          "output_type": "vat_return",
+          "tax_rate": 0.20
+        },
+        {
+          "id": "UK-PAYE",
+          "name": "PAYE & National Insurance",
+          "form": "FPS/EPS",
+          "description": "Monthly payroll reporting and payment",
+          "frequency": "monthly",
+          "applies_to": ["ltd", "plc", "llp"],
+          "penalty_for_late_filing": "£100-£400 depending on employee count",
+          "required_data": ["gross_pay", "income_tax_deducted", "employer_nic", "employee_nic"],
+          "output_type": "payroll_return",
+          "tax_rate": 0.138
+        }
+      ]
+    },
+    "DE": {
+      "country_name": "Germany",
+      "currency": "EUR",
+      "tax_authority": "Bundeszentralamt für Steuern (BZSt)",
+      "obligations": [
+        {
+          "id": "DE-CIT",
+          "name": "Corporate Income Tax",
+          "form": "Körperschaftsteuererklärung",
+          "description": "Annual corporate income tax return",
+          "frequency": "annual",
+          "due_month": 7,
+          "due_day": 31,
+          "applies_to": ["gmbh", "ag"],
+          "penalty_for_late_filing": "0.25% of tax assessed per month, min €25",
+          "required_data": ["handelsbilanz", "steuerbilanz", "gewinn"],
+          "output_type": "tax_return",
+          "tax_rate": 0.15825
+        },
+        {
+          "id": "DE-GWT",
+          "name": "Trade Tax",
+          "form": "Gewerbesteuererklärung",
+          "description": "Annual trade tax based on municipal rates",
+          "frequency": "annual",
+          "due_month": 7,
+          "due_day": 31,
+          "applies_to": ["gmbh", "ag", "gmbh_co_kg"],
+          "penalty_for_late_filing": "Same as CIT",
+          "required_data": ["gewinn_aus_gewerbebetrieb", "hinzurechnungen", "kuerzungen"],
+          "output_type": "tax_return",
+          "tax_rate": 0.14
+        },
+        {
+          "id": "DE-VAT",
+          "name": "Value Added Tax Advance Return",
+          "form": "Umsatzsteuer-Voranmeldung",
+          "description": "Monthly or quarterly VAT return",
+          "frequency": "monthly",
+          "applies_to": ["gmbh", "ag", "gmbh_co_kg"],
+          "penalty_for_late_filing": "up to 10% of assessed tax, max €25,000",
+          "required_data": ["steuerpflichtige_umsaetze", "vorsteuer", "zahllast"],
+          "output_type": "vat_return",
+          "tax_rate": 0.19
+        }
+      ]
+    },
+    "AU": {
+      "country_name": "Australia",
+      "currency": "AUD",
+      "tax_authority": "Australian Taxation Office (ATO)",
+      "obligations": [
+        {
+          "id": "AU-CIT",
+          "name": "Company Tax Return",
+          "form": "NAT 0656",
+          "description": "Annual company income tax return",
+          "frequency": "annual",
+          "due_month": 2,
+          "due_day": 28,
+          "applies_to": ["pty_ltd", "ltd"],
+          "penalty_for_late_filing": "$275 base penalty up to 5x depending on size",
+          "required_data": ["total_income", "total_expenses", "taxable_income"],
+          "output_type": "tax_return",
+          "tax_rate": 0.30
+        },
+        {
+          "id": "AU-BAS",
+          "name": "Business Activity Statement (GST + PAYG)",
+          "form": "BAS",
+          "description": "Quarterly statement for GST and Pay As You Go installments",
+          "frequency": "quarterly",
+          "quarterly_dates": [
+            {"quarter": "Q1", "due_month": 4, "due_day": 28},
+            {"quarter": "Q2", "due_month": 7, "due_day": 28},
+            {"quarter": "Q3", "due_month": 10, "due_day": 28},
+            {"quarter": "Q4", "due_month": 2, "due_day": 28}
+          ],
+          "applies_to": ["pty_ltd", "ltd"],
+          "penalty_for_late_filing": "Failure to lodge on time penalty",
+          "required_data": ["total_sales", "gst_collected", "gst_paid_on_purchases", "payg_withheld", "payg_income_tax_instalment"],
+          "output_type": "activity_statement",
+          "tax_rate": 0.10
+        }
+      ]
+    }
+  }
+}
