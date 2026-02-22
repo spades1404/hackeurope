@@ -1,2 +1,12 @@
+<<<<<<< Updated upstream
+*.pyc
+*.env
+node_modules/
+.vite/
+dist/
+dist-ssr/
+*.local
+=======
 /backend/__pycache__
 .env
+>>>>>>> Stashed changes

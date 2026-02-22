@@ -10,38 +10,40 @@ import logging
 import litellm
 
 import config
-from models.schemas import ExtractedInvoiceData
+from schemas import ExtractedInvoiceData
 
 logger = logging.getLogger(__name__)
 
-EXTRACTION_PROMPT = """You are an expert German tax accountant (Steuerberater). 
-Analyze this invoice (Rechnung) and extract ALL fields into JSON.
+EXTRACTION_PROMPT = """You are an expert accountant. Analyze this invoice or receipt and
+extract ALL fields into JSON.
 
 Return ONLY valid JSON with this exact structure — no markdown, no explanation:
 
 {
-  "invoice_number": "Rechnungsnummer as string",
+  "invoice_number": "invoice/receipt number as string",
   "invoice_date": "YYYY-MM-DD",
   "due_date": "YYYY-MM-DD or null",
   "vendor_name": "seller/vendor company name",
   "vendor_address": "full address",
-  "vendor_tax_id": "USt-IdNr or Steuernummer",
+  "vendor_tax_id": "VAT number or tax ID if present",
   "vendor_iban": "IBAN if present",
-  "buyer_name": "buyer company name",
+  "buyer_name": "buyer company or person name",
   "net_amount": 0.00,
-  "vat_rate": 19.0,
+  "vat_rate": 0.0,
   "vat_amount": 0.00,
   "gross_amount": 0.00,
   "line_items": [{"description": "...", "quantity": 1, "unit_price": 0.00, "total": 0.00}],
-  "payment_reference": "Verwendungszweck if stated, else null"
+  "payment_reference": "payment reference or memo if stated, else null"
 }
 
 Rules:
 - All amounts as plain numbers, no currency symbols
 - Dates strictly YYYY-MM-DD
 - null for missing fields
-- Look for German terms: Rechnungsnr., Rechnungsdatum, Netto, Brutto, MwSt/USt, Fällig am
-- gross_amount = net_amount + vat_amount — verify the math"""
+- Common field labels to look for: Invoice No., Invoice #, Receipt No., Invoice Date,
+  Issue Date, Due Date, Payment Due, Subtotal, Tax, VAT, GST, Total, Grand Total,
+  Amount Due, Bill To, Sold To, Payment Reference, Memo, Order Number
+- gross_amount = net_amount + vat_amount — verify the arithmetic"""
 
 
 def extract_invoice_data(
@@ -80,21 +82,46 @@ def extract_invoice_data(
     ]
 
     try:
-        response = litellm.completion(
-            model=model,
-            messages=messages,
-            temperature=0.0,
-            max_tokens=2000,
-        )
+        try:
+            from langfuse import get_client as _lf_client
+            _lf = _lf_client()
+        except Exception:
+            _lf = None
 
-        raw = response.choices[0].message.content.strip()
+        if _lf and _lf._tracing_enabled:
+            gen_ctx = _lf.start_as_current_generation(
+                name="invoice_extraction_llm",
+                model=model,
+                input=messages,
+            )
+        else:
+            from contextlib import nullcontext
+            gen_ctx = nullcontext()
 
-        # Clean markdown fences
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1]
-        if raw.endswith("```"):
-            raw = raw.rsplit("```", 1)[0]
-        raw = raw.strip()
+        with gen_ctx as gen:
+            response = litellm.completion(
+                model=model,
+                messages=messages,
+                temperature=0.0,
+                max_tokens=2000,
+            )
+
+            raw = response.choices[0].message.content.strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[1]
+            if raw.endswith("```"):
+                raw = raw.rsplit("```", 1)[0]
+            raw = raw.strip()
+
+            if gen is not None:
+                usage = getattr(response, "usage", None)
+                gen.update(
+                    output=raw,
+                    usage_details={
+                        "input": getattr(usage, "prompt_tokens", 0),
+                        "output": getattr(usage, "completion_tokens", 0),
+                    },
+                )
 
         data = json.loads(raw)
         result = ExtractedInvoiceData(**data)

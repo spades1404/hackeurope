@@ -15,7 +15,7 @@ load_dotenv()
 EXTRACTION_MODEL = os.getenv("EXTRACTION_MODEL", "gemini/gemini-2.0-flash")
 
 # Used for: generating Gmail search queries from transaction data
-SEARCH_QUERY_MODEL = os.getenv("SEARCH_QUERY_MODEL", "gemini/gemini-2.0-flash")
+SEARCH_QUERY_MODEL = os.getenv("SEARCH_QUERY_MODEL", "anthropic/claude-haiku-4-5-20251001")
 
 # --- API Keys ---
 # LiteLLM picks these up automatically based on the provider prefix
@@ -37,6 +37,16 @@ LANGFUSE_ENABLED = bool(LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY)
 CONFIDENCE_THRESHOLD_AUTO = float(os.getenv("CONFIDENCE_THRESHOLD_AUTO", "0.85"))
 CONFIDENCE_THRESHOLD_REVIEW = float(os.getenv("CONFIDENCE_THRESHOLD_REVIEW", "0.50"))
 DATE_WINDOW_DAYS = int(os.getenv("DATE_WINDOW_DAYS", "30"))
+
+# --- OCR Loop ---
+# Stop running OCR on further candidates once this confidence is reached
+OCR_CONFIDENCE_TARGET = float(os.getenv("OCR_CONFIDENCE_TARGET", "0.90"))
+# Maximum number of candidates to run OCR on per transaction
+MAX_OCR_CANDIDATES = int(os.getenv("MAX_OCR_CANDIDATES", "3"))
+# How many emails to fetch metadata for per search
+MAX_SEARCH_RESULTS = int(os.getenv("MAX_SEARCH_RESULTS", "10"))
+# Skip OCR for candidates whose pre-filter score is below this
+PRE_FILTER_MIN_SCORE = float(os.getenv("PRE_FILTER_MIN_SCORE", "0.15"))
 
 # --- Server ---
 HOST = os.getenv("HOST", "0.0.0.0")
