@@ -60,6 +60,21 @@ def _get_langfuse():
 
 
 # ---------------------------------------------------------------------------
+# PAID setup
+# ---------------------------------------------------------------------------
+
+_paid = None
+
+
+def _get_paid():
+    global _paid
+    if _paid is None and config.PAID_API_KEY:
+        from paid import Paid
+        _paid = Paid(token=config.PAID_API_KEY)
+    return _paid
+
+
+# ---------------------------------------------------------------------------
 # LangGraph State
 # ---------------------------------------------------------------------------
 
@@ -527,6 +542,19 @@ def reconcile_transaction(transaction: Transaction) -> ReconciliationResult:
         f"confidence={proposal.confidence_score if proposal else 'N/A'}, "
         f"ocr_attempts={final_state.get('ocr_candidates_tried', 0)}"
     )
+
+    if result.status == "matched":
+        paid = _get_paid()
+        if paid:
+            try:
+                paid.signals.create_signals(signals=[{
+                    "event_name": "transaction_reconciled",
+                    "customer": {"external_customer_id": transaction.customer_id},
+                    "attribution": {"external_product_id": config.PAID_PRODUCT_ID},
+                    "idempotency_key": f"reconcile_{transaction.id}",
+                }])
+            except Exception as e:
+                logger.warning(f"PAID signal failed for txn {transaction.id}: {e}")
 
     return result
 

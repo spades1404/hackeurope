@@ -106,6 +106,7 @@ def load_first_n_transactions(csv_path: Path, n: int) -> list[Transaction]:
                 counterparty_name=row["Counterparty Name"].strip(),
                 counterparty_iban=row["Counterparty IBAN"].strip() or None,
                 reference=row["Reference"].strip() or None,
+                customer_id="cus_5hhUuAA811y",
             )
             transactions.append(txn)
     return transactions

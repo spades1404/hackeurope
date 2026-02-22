@@ -24,6 +24,7 @@ class Transaction(BaseModel):
     counterparty_iban: Optional[str] = None
     reference: Optional[str] = None  # Verwendungszweck
     match_status: MatchStatus = MatchStatus.PENDING
+    customer_id: str = "unknown"  # PAID billing customer identifier
 
 
 class ExtractedInvoiceData(BaseModel):

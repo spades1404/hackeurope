@@ -48,6 +48,10 @@ MAX_SEARCH_RESULTS = int(os.getenv("MAX_SEARCH_RESULTS", "10"))
 # Skip OCR for candidates whose pre-filter score is below this
 PRE_FILTER_MIN_SCORE = float(os.getenv("PRE_FILTER_MIN_SCORE", "0.15"))
 
+# --- PAID ---
+PAID_API_KEY = os.getenv("PAID_API_KEY", "")
+PAID_PRODUCT_ID = os.getenv("PAID_PRODUCT_ID", "prod_5hhUfQ66cRm")
+
 # --- Server ---
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8001"))

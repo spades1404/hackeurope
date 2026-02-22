@@ -54,6 +54,7 @@ class TransactionInput(BaseModel):
     counterparty_name: str
     counterparty_iban: str | None = None
     reference: str | None = None
+    customer_id: str = "unknown"  # PAID billing customer identifier
 
 
 class ReconcileRequest(BaseModel):
@@ -95,6 +96,7 @@ def reconcile(request: ReconcileRequest):
                 counterparty_name=t.counterparty_name,
                 counterparty_iban=t.counterparty_iban,
                 reference=t.reference,
+                customer_id=t.customer_id,
             )
         )
 
