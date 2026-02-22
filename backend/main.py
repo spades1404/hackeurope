@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, Body, Query, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, JSONResponse
 from contextlib import asynccontextmanager
 from typing import List, Optional
 from pydantic import BaseModel
@@ -67,6 +67,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def catch_all_exception_handler(request, exc):
+    """Return 500 with error message so we can see what went wrong."""
+    if isinstance(exc, HTTPException):
+        raise exc
+    return JSONResponse(status_code=500, content={"detail": str(exc)})
 
 
 @app.post("/api/users", response_model=UserModel)
@@ -278,17 +286,21 @@ async def run_scheduler_endpoint():
 async def scheduler_status_endpoint():
     return {"status": "running"}
 
-UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads", "invoices")
+UPLOAD_DIR = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads", "invoices"))
 
 @app.post("/api/upload-invoice")
 async def upload_invoice_endpoint(files: List[UploadFile] = File(...)):
     """Accept one or more files and save them to backend/uploads/invoices."""
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    try:
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Cannot create upload dir: {e!s}")
     saved = []
     for f in files:
         if not f.filename:
             continue
-        # Keep original filename (use basename to avoid path traversal)
         filename = os.path.basename(f.filename)
         path = os.path.join(UPLOAD_DIR, filename)
         try:
@@ -297,7 +309,9 @@ async def upload_invoice_endpoint(files: List[UploadFile] = File(...)):
                 out.write(contents)
             saved.append({"original_filename": f.filename, "saved_as": filename, "path": path})
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to save {f.filename}: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Failed to save {f.filename!r}: {e!s}")
     return {"message": "Files saved", "saved": saved}
 
 @app.get("/health")
