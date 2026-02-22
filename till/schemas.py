@@ -55,6 +55,8 @@ class EmailCandidate(BaseModel):
     # Stored for later download (mutually exclusive):
     pdf_attachment_id: Optional[str] = None   # large attachment — needs attachments.get()
     pdf_inline_data: Optional[str] = None     # small inline attachment — already available
+    # Invoice date extracted from email body text (before OCR) — used for ranking
+    invoice_date_hint: Optional[date] = None
     # Set after pre-filter scoring:
     pre_filter_score: float = 0.0
     pre_filter_reasons: list[str] = Field(default_factory=list)

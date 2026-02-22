@@ -82,21 +82,46 @@ def extract_invoice_data(
     ]
 
     try:
-        response = litellm.completion(
-            model=model,
-            messages=messages,
-            temperature=0.0,
-            max_tokens=2000,
-        )
+        try:
+            from langfuse import get_client as _lf_client
+            _lf = _lf_client()
+        except Exception:
+            _lf = None
 
-        raw = response.choices[0].message.content.strip()
+        if _lf and _lf._tracing_enabled:
+            gen_ctx = _lf.start_as_current_generation(
+                name="invoice_extraction_llm",
+                model=model,
+                input=messages,
+            )
+        else:
+            from contextlib import nullcontext
+            gen_ctx = nullcontext()
 
-        # Clean markdown fences
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1]
-        if raw.endswith("```"):
-            raw = raw.rsplit("```", 1)[0]
-        raw = raw.strip()
+        with gen_ctx as gen:
+            response = litellm.completion(
+                model=model,
+                messages=messages,
+                temperature=0.0,
+                max_tokens=2000,
+            )
+
+            raw = response.choices[0].message.content.strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[1]
+            if raw.endswith("```"):
+                raw = raw.rsplit("```", 1)[0]
+            raw = raw.strip()
+
+            if gen is not None:
+                usage = getattr(response, "usage", None)
+                gen.update(
+                    output=raw,
+                    usage_details={
+                        "input": getattr(usage, "prompt_tokens", 0),
+                        "output": getattr(usage, "completion_tokens", 0),
+                    },
+                )
 
         data = json.loads(raw)
         result = ExtractedInvoiceData(**data)

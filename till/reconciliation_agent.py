@@ -48,12 +48,14 @@ def _get_langfuse():
     global _langfuse
     if _langfuse is None and config.LANGFUSE_ENABLED:
         from langfuse import Langfuse
+        import litellm
 
         _langfuse = Langfuse(
             public_key=config.LANGFUSE_PUBLIC_KEY,
             secret_key=config.LANGFUSE_SECRET_KEY,
             host=config.LANGFUSE_HOST,
         )
+
     return _langfuse
 
 
@@ -75,7 +77,6 @@ class AgentState(TypedDict):
     emails_found: int
     ocr_candidates_tried: int
     error: str | None
-    trace_id: str | None
 
 
 # ---------------------------------------------------------------------------
@@ -85,13 +86,11 @@ class AgentState(TypedDict):
 def generate_search_query(state: AgentState) -> dict:
     """Node 1: Generate Gmail search query from transaction data."""
     txn = state["transaction"]
-    trace_id = state.get("trace_id")
 
     langfuse = _get_langfuse()
     span = None
-    if langfuse and trace_id:
-        span = langfuse.span(
-            trace_id=trace_id,
+    if langfuse:
+        span = langfuse.start_span(
             name="generate_search_query",
             input={"transaction_id": txn.id, "counterparty": txn.counterparty_name},
         )
@@ -109,10 +108,11 @@ def generate_search_query(state: AgentState) -> dict:
         duration = time.time() - start
 
         if span:
-            span.end(
+            span.update(
                 output=result,
                 metadata={"duration_s": round(duration, 2), "model": config.SEARCH_QUERY_MODEL},
             )
+            span.end()
 
         return {
             "gmail_query": result["query"],
@@ -122,7 +122,8 @@ def generate_search_query(state: AgentState) -> dict:
     except Exception as e:
         logger.error(f"Search query generation failed for txn {txn.id}: {e}")
         if span:
-            span.end(output={"error": str(e)}, level="ERROR")
+            span.update(output={"error": str(e)})
+            span.end()
         return {"error": f"Search query generation failed: {e}"}
 
 
@@ -141,13 +142,11 @@ def search_gmail_metadata(state: AgentState) -> dict:
         return {"error": "No Gmail query available", "email_candidates": [], "emails_found": 0}
 
     txn = state["transaction"]
-    trace_id = state.get("trace_id")
 
     langfuse = _get_langfuse()
     span = None
-    if langfuse and trace_id:
-        span = langfuse.span(
-            trace_id=trace_id,
+    if langfuse:
+        span = langfuse.start_span(
             name="search_gmail_metadata",
             input={"query": query, "transaction_id": txn.id},
         )
@@ -172,7 +171,7 @@ def search_gmail_metadata(state: AgentState) -> dict:
         pdf_count = sum(1 for c in candidates if c.has_pdf)
 
         if span:
-            span.end(
+            span.update(
                 output={
                     "candidates": len(candidates),
                     "with_pdf": pdf_count,
@@ -180,6 +179,7 @@ def search_gmail_metadata(state: AgentState) -> dict:
                 },
                 metadata={"duration_s": round(duration, 2)},
             )
+            span.end()
 
         return {
             "email_candidates": candidates,
@@ -189,7 +189,8 @@ def search_gmail_metadata(state: AgentState) -> dict:
     except Exception as e:
         logger.error(f"Gmail metadata search failed for txn {txn.id}: {e}")
         if span:
-            span.end(output={"error": str(e)}, level="ERROR")
+            span.update(output={"error": str(e)})
+            span.end()
         return {
             "error": f"Gmail search failed: {e}",
             "email_candidates": [],
@@ -210,13 +211,11 @@ def pre_filter_candidates(state: AgentState) -> dict:
     """
     candidates: list[EmailCandidate] = state.get("email_candidates", [])
     txn = state["transaction"]
-    trace_id = state.get("trace_id")
 
     langfuse = _get_langfuse()
     span = None
-    if langfuse and trace_id:
-        span = langfuse.span(
-            trace_id=trace_id,
+    if langfuse:
+        span = langfuse.start_span(
             name="pre_filter_candidates",
             input={"transaction_id": txn.id, "candidates": len(candidates)},
         )
@@ -228,22 +227,49 @@ def pre_filter_candidates(state: AgentState) -> dict:
         c.pre_filter_reasons = reasons
         scored.append(c)
         logger.debug(
-            f"  [{score:.2f}] {c.email_from!r} | {c.email_subject!r} | pdf={c.has_pdf}"
+            f"  [{score:.2f}] {c.email_from!r} | {c.email_subject!r} | "
+            f"pdf={c.has_pdf} | inv_date={c.invoice_date_hint}"
         )
 
-    ranked = sorted(scored, key=lambda c: c.pre_filter_score, reverse=True)
+    def _date_proximity(c: EmailCandidate) -> float:
+        """Days between the invoice date hint (from email body) and the transaction date.
+
+        Falls back to email send date if no hint was extracted.
+        Candidates with no date signal at all sort to the end.
+        """
+        d = c.invoice_date_hint
+        if d is None:
+            try:
+                d = c.email_date.date() if hasattr(c.email_date, "date") else c.email_date
+            except Exception:
+                return float("inf")
+        try:
+            return abs((txn.date - d).days)
+        except Exception:
+            return float("inf")
+
+    # Sort primarily by pre-filter score, then by invoice date proximity to the
+    # transaction. Among same-supplier candidates (equal scores), the invoice
+    # dated closest to the transaction is tried first through OCR.
+    ranked = sorted(scored, key=lambda c: (-c.pre_filter_score, _date_proximity(c)))
 
     if span:
         top = [
             {"from": c.email_from, "subject": c.email_subject, "score": c.pre_filter_score}
             for c in ranked[:3]
         ]
-        span.end(output={"top_candidates": top})
+        span.update(output={"top_candidates": top})
+        span.end()
 
     logger.info(
         f"Pre-filter complete for txn {txn.id}: "
         f"{len(ranked)} candidates, top score={ranked[0].pre_filter_score if ranked else 0:.2f}"
     )
+    for i, c in enumerate(ranked[:5]):
+        logger.info(
+            f"  [{i+1}] score={c.pre_filter_score:.2f} | "
+            f"inv_date={c.invoice_date_hint} | {c.email_subject!r}"
+        )
 
     return {"ranked_candidates": ranked}
 
@@ -265,13 +291,11 @@ def extract_until_confident(state: AgentState) -> dict:
     """
     ranked: list[EmailCandidate] = state.get("ranked_candidates", [])
     txn = state["transaction"]
-    trace_id = state.get("trace_id")
 
     langfuse = _get_langfuse()
     span = None
-    if langfuse and trace_id:
-        span = langfuse.span(
-            trace_id=trace_id,
+    if langfuse:
+        span = langfuse.start_span(
             name="extract_until_confident",
             input={"transaction_id": txn.id, "candidates_available": len(ranked)},
         )
@@ -355,13 +379,14 @@ def extract_until_confident(state: AgentState) -> dict:
             break
 
     if span:
-        span.end(
+        span.update(
             output={
                 "ocr_attempts": tried,
                 "best_confidence": best_proposal.confidence_score if best_proposal else None,
                 "status": best_proposal.status.value if best_proposal else "no_match",
             }
         )
+        span.end()
 
     if not best_proposal:
         logger.info(f"No match found after {tried} OCR attempts for txn {txn.id}")
@@ -433,21 +458,6 @@ def get_graph():
 def reconcile_transaction(transaction: Transaction) -> ReconciliationResult:
     """Reconcile a single transaction: find matching invoice in Gmail."""
     langfuse = _get_langfuse()
-    trace = None
-    trace_id = None
-
-    if langfuse:
-        trace = langfuse.trace(
-            name="reconcile_transaction",
-            input={
-                "transaction_id": transaction.id,
-                "counterparty": transaction.counterparty_name,
-                "amount": transaction.amount,
-                "date": transaction.date.isoformat(),
-            },
-            metadata={"currency": transaction.currency},
-        )
-        trace_id = trace.id
 
     initial_state: AgentState = {
         "transaction": transaction,
@@ -460,21 +470,46 @@ def reconcile_transaction(transaction: Transaction) -> ReconciliationResult:
         "emails_found": 0,
         "ocr_candidates_tried": 0,
         "error": None,
-        "trace_id": trace_id,
     }
 
     graph = get_graph()
-    final_state = graph.invoke(initial_state)
 
-    proposal = final_state.get("match_proposal")
-    error = final_state.get("error")
+    def _run():
+        return graph.invoke(initial_state)
 
-    if proposal:
-        status = proposal.status.value
-    elif error:
-        status = "error"
+    if langfuse:
+        with langfuse.start_as_current_span(
+            name="reconcile_transaction",
+            input={
+                "transaction_id": transaction.id,
+                "counterparty": transaction.counterparty_name,
+                "amount": transaction.amount,
+                "date": transaction.date.isoformat(),
+            },
+        ) as root_span:
+            langfuse.update_current_trace(
+                name=f"reconcile:{transaction.counterparty_name}",
+                metadata={"currency": transaction.currency},
+            )
+            final_state = _run()
+
+            proposal = final_state.get("match_proposal")
+            error = final_state.get("error")
+            status = proposal.status.value if proposal else ("error" if error else "no_match")
+
+            root_span.update(
+                output={
+                    "status": status,
+                    "confidence": proposal.confidence_score if proposal else None,
+                    "emails_found": final_state.get("emails_found", 0),
+                    "ocr_attempts": final_state.get("ocr_candidates_tried", 0),
+                }
+            )
     else:
-        status = "no_match"
+        final_state = _run()
+        proposal = final_state.get("match_proposal")
+        error = final_state.get("error")
+        status = proposal.status.value if proposal else ("error" if error else "no_match")
 
     result = ReconciliationResult(
         transaction_id=transaction.id,
@@ -485,16 +520,6 @@ def reconcile_transaction(transaction: Transaction) -> ReconciliationResult:
         emails_found=final_state.get("emails_found", 0),
         error=error,
     )
-
-    if trace:
-        trace.update(
-            output={
-                "status": result.status,
-                "confidence": proposal.confidence_score if proposal else None,
-                "emails_found": result.emails_found,
-                "ocr_attempts": final_state.get("ocr_candidates_tried", 0),
-            },
-        )
 
     logger.info(
         f"Transaction {transaction.id} ({transaction.counterparty_name}): "

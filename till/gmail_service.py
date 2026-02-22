@@ -12,7 +12,8 @@ Flow:
 import base64
 import logging
 import os
-from datetime import datetime
+import re
+from datetime import date, datetime
 
 from schemas import EmailCandidate, EmailInvoice
 import config
@@ -122,6 +123,9 @@ class GmailService:
         # Scan MIME structure for a PDF — store IDs but don't download yet
         pdf_info = _scan_for_pdf(msg["payload"])
 
+        body_text = _extract_body_text(msg["payload"])
+        invoice_date_hint = _parse_invoice_date(body_text)
+
         return EmailCandidate(
             email_id=message_id,
             email_from=email_from,
@@ -131,6 +135,7 @@ class GmailService:
             pdf_filename=pdf_info[0] if pdf_info else None,
             pdf_attachment_id=pdf_info[1] if pdf_info else None,
             pdf_inline_data=pdf_info[2] if pdf_info else None,
+            invoice_date_hint=invoice_date_hint,
         )
 
     def download_pdf_for_candidate(self, candidate: EmailCandidate) -> EmailInvoice | None:
@@ -271,6 +276,68 @@ def _scan_for_pdf(
             if result:
                 return result
 
+    return None
+
+
+def _extract_body_text(payload: dict) -> str:
+    """Recursively extract plain text (or HTML stripped of tags) from MIME payload."""
+    mime_type = payload.get("mimeType", "")
+    parts = payload.get("parts", [])
+
+    if not parts:
+        if mime_type in ("text/plain", "text/html"):
+            data = payload.get("body", {}).get("data", "")
+            if data:
+                raw = base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="ignore")
+                if mime_type == "text/html":
+                    raw = re.sub(r"<[^>]+>", " ", raw)
+                return raw
+        return ""
+
+    # Prefer text/plain parts, fall back to text/html
+    plain, html = "", ""
+    for part in parts:
+        ptype = part.get("mimeType", "")
+        if ptype == "text/plain":
+            plain += _extract_body_text(part)
+        elif ptype == "text/html":
+            html += _extract_body_text(part)
+        elif ptype.startswith("multipart/"):
+            plain += _extract_body_text(part)
+
+    return plain or html
+
+
+# Date patterns to look for in the email body, paired with strptime format strings
+_DATE_PATTERNS = [
+    # "Invoice Date: 2023-01-15" or "Date: 2023-01-15"
+    (r"(?:invoice\s+date|billing\s+date|date)[:\s]+(\d{4}-\d{2}-\d{2})", "%Y-%m-%d"),
+    # "Invoice Date: 15/01/2023"
+    (r"(?:invoice\s+date|billing\s+date|date)[:\s]+(\d{2}/\d{2}/\d{4})", "%d/%m/%Y"),
+    # "Invoice Date: January 15, 2023"
+    (r"(?:invoice\s+date|billing\s+date|date)[:\s]+([A-Za-z]+ \d{1,2},? \d{4})", "%B %d %Y"),
+    # "Invoice Date: 15 January 2023"
+    (r"(?:invoice\s+date|billing\s+date|date)[:\s]+(\d{1,2} [A-Za-z]+ \d{4})", "%d %B %Y"),
+    # Bare ISO date anywhere in the body as last resort
+    (r"\b(\d{4}-\d{2}-\d{2})\b", "%Y-%m-%d"),
+]
+
+
+def _parse_invoice_date(body_text: str) -> date | None:
+    """Extract the most likely invoice date from email body text."""
+    if not body_text:
+        return None
+    text = body_text.lower()
+    for pattern, fmt in _DATE_PATTERNS:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            raw = match.group(1).strip().rstrip(",")
+            # Normalise "january 5 2023" → "January 05 2023" for strptime
+            raw = re.sub(r"\s+", " ", raw)
+            try:
+                return datetime.strptime(raw, fmt).date()
+            except ValueError:
+                continue
     return None
 
 

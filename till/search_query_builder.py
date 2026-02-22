@@ -25,14 +25,13 @@ the matching invoice or receipt PDF.
 
 Rules for Gmail search syntax:
 - ALWAYS include has:attachment and filename:pdf
-- Use "from:" to filter by the vendor's likely email domain when you can infer it
-  e.g. for "Stripe" use from:stripe.com, for "Amazon Web Services" use from:amazon.com
-  If you cannot confidently infer the domain, omit the from: filter
-- Use "after:" and "before:" for a date range (format: YYYY/MM/DD)
-  The range should cover 30 days before the transaction date up to the transaction date
-- Use 1-2 keywords from the vendor name only if there is no reliable from: filter
-- Keep the query broad enough to catch the email — too specific risks missing it
-- Do NOT use quotes around the from: value
+- If a payment reference is provided, ALWAYS search for it in the subject line using
+  subject:{reference} — the reference typically appears verbatim in the invoice subject
+- Also include the most distinctive word from the vendor name with subject:
+  e.g. for "HubSpot Ireland" add subject:HubSpot, for "Salesforce EMEA" add subject:Salesforce
+  (skip generic words like Ireland, EMEA, Group, Ltd)
+- Do NOT use from: filters or date range filters — invoice emails may come from
+  various addresses and we rank by invoice date extracted from the body instead
 
 Return ONLY a JSON object with this exact structure, no markdown:
 {
@@ -42,10 +41,8 @@ Return ONLY a JSON object with this exact structure, no markdown:
 
 USER_PROMPT_TEMPLATE = """Generate a Gmail search query for this bank transaction:
 
-- Date: {date}
 - Amount: {amount} {currency}
 - Counterparty: {counterparty_name}
-- IBAN: {iban}
 - Reference: {reference}
 
 Return the JSON object with the query."""
@@ -68,33 +65,58 @@ def build_search_query(
     model = model or config.SEARCH_QUERY_MODEL
 
     user_prompt = USER_PROMPT_TEMPLATE.format(
-        date=transaction_date,
         amount=abs(amount),
         currency=currency,
         counterparty_name=counterparty_name,
-        iban=iban or "N/A",
         reference=reference or "N/A",
     )
 
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
+
     try:
-        response = litellm.completion(
-            model=model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.0,
-            max_tokens=300,
-        )
+        try:
+            from langfuse import get_client as _lf_client
+            _lf = _lf_client()
+        except Exception:
+            _lf = None
 
-        raw = response.choices[0].message.content.strip()
+        if _lf and _lf._tracing_enabled:
+            gen_ctx = _lf.start_as_current_generation(
+                name="search_query_llm",
+                model=model,
+                input=messages,
+            )
+        else:
+            from contextlib import nullcontext
+            gen_ctx = nullcontext()
 
-        # Clean markdown fences if present
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1]
-        if raw.endswith("```"):
-            raw = raw.rsplit("```", 1)[0]
-        raw = raw.strip()
+        with gen_ctx as gen:
+            response = litellm.completion(
+                model=model,
+                messages=messages,
+                temperature=0.0,
+                max_tokens=300,
+            )
+
+            raw = response.choices[0].message.content.strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[1]
+            if raw.endswith("```"):
+                raw = raw.rsplit("```", 1)[0]
+            raw = raw.strip()
+
+            if gen is not None:
+                usage = getattr(response, "usage", None)
+                gen.update(
+                    output=raw,
+                    usage_details={
+                        "input": getattr(usage, "prompt_tokens", 0),
+                        "output": getattr(usage, "completion_tokens", 0),
+                    },
+                )
 
         result = json.loads(raw)
         logger.info(f"Search query for '{counterparty_name}': {result['query']}")
@@ -102,10 +124,10 @@ def build_search_query(
 
     except json.JSONDecodeError as e:
         logger.warning(f"LLM returned invalid JSON, falling back to deterministic query: {e}")
-        return _deterministic_query(transaction_date, counterparty_name)
+        return _deterministic_query(counterparty_name, reference)
     except Exception as e:
         logger.error(f"LLM search query generation failed: {e}")
-        return _deterministic_query(transaction_date, counterparty_name)
+        return _deterministic_query(counterparty_name, reference)
 
 
 def build_broad_fallback_query(counterparty_name: str) -> dict:
@@ -149,20 +171,17 @@ def _key_name_words(name: str, max_words: int = 2) -> list[str]:
     return meaningful[:max_words]
 
 
-def _deterministic_query(transaction_date: str, counterparty_name: str) -> dict:
+def _deterministic_query(counterparty_name: str, reference: str | None = None) -> dict:
     """Deterministic fallback if LLM fails."""
-    from datetime import datetime, timedelta
+    key_words = _key_name_words(counterparty_name, max_words=1)
+    name_query = key_words[0] if key_words else counterparty_name.split()[0]
 
-    txn_date = datetime.strptime(transaction_date, "%Y-%m-%d")
-    after_date = (txn_date - timedelta(days=30)).strftime("%Y/%m/%d")
-    before_date = (txn_date + timedelta(days=1)).strftime("%Y/%m/%d")
-
-    key_words = _key_name_words(counterparty_name, max_words=2)
-    name_query = " ".join(key_words) if key_words else counterparty_name.split()[0]
-
-    query = f"{name_query} has:attachment filename:pdf after:{after_date} before:{before_date}"
+    if reference:
+        query = f"subject:{reference} subject:{name_query} has:attachment filename:pdf"
+    else:
+        query = f"subject:{name_query} has:attachment filename:pdf"
 
     return {
         "query": query,
-        "reasoning": "Deterministic fallback: vendor keywords + date range",
+        "reasoning": "Deterministic fallback: reference + vendor name in subject",
     }
