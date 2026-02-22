@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Body, Query
+from fastapi import FastAPI, HTTPException, Body, Query, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from contextlib import asynccontextmanager
@@ -277,6 +277,28 @@ async def run_scheduler_endpoint():
 @app.get("/api/scheduler/status")
 async def scheduler_status_endpoint():
     return {"status": "running"}
+
+UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads", "invoices")
+
+@app.post("/api/upload-invoice")
+async def upload_invoice_endpoint(files: List[UploadFile] = File(...)):
+    """Accept one or more files and save them to backend/uploads/invoices."""
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    saved = []
+    for f in files:
+        if not f.filename:
+            continue
+        # Keep original filename (use basename to avoid path traversal)
+        filename = os.path.basename(f.filename)
+        path = os.path.join(UPLOAD_DIR, filename)
+        try:
+            contents = await f.read()
+            with open(path, "wb") as out:
+                out.write(contents)
+            saved.append({"original_filename": f.filename, "saved_as": filename, "path": path})
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to save {f.filename}: {str(e)}")
+    return {"message": "Files saved", "saved": saved}
 
 @app.get("/health")
 async def health():
