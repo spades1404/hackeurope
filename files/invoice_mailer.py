@@ -34,7 +34,7 @@ from reportlab.pdfgen import canvas as rl_canvas
 
 # ── CONFIG ──────────────────────────────────────────────────────────────
 YOUR_GMAIL     = "hogandan42@gmail.com"
-YOUR_APP_PASSWORD = "qwyv hmbo esmz xktc"
+YOUR_APP_PASSWORD = ""
 CSV_FILE       = "transactions.csv"
 SMTP_SERVER    = "smtp.gmail.com"
 SMTP_PORT      = 465
