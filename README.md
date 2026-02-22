@@ -1,4 +1,4 @@
-# TunaTax MVP (Backend Only)
+# TunaTax MVP 
 
 This is the backend for **TunaTax**, an agentic tax compliance autopilot for multinational businesses, built with Python, FastAPI, SQLite, and the `litellm` SDK.
 
