@@ -50,6 +50,11 @@ async def lifespan(app: FastAPI):
     # Initialize DB on startup
     await database.init_db()
     
+    from backend.seed_demo import seed_demo_data
+    seeded = await seed_demo_data(database)
+    if seeded:
+        print("✅ Demo data seeded successfully")
+        
     scheduler_task = asyncio.create_task(
         scheduler_loop(database, shared_agent_generate)
     )
@@ -98,9 +103,6 @@ async def create_company_endpoint(profile: CompanyProfile):
         for a in actions:
             a["company_id"] = profile.id
         await database.create_actions_batch(actions)
-
-    # Seed demo financials
-    await database.seed_demo_transactions(profile.id, profile.model_dump())
         
     return profile
 
@@ -178,18 +180,129 @@ async def generate_document_endpoint(action_id: str):
     
     return {"document_id": doc_id, "document": doc}
 
-# === Transaction Management (for demo data + future integrations) ===
+# === Demo / Reconciliation API ===
+
+@app.post("/api/demo/generate-data")
+async def generate_demo_data(company_id: str = "tuna-tax-ltd"):
+    from backend.demo_generator import generate_fresh_demo_data
+    result = await generate_fresh_demo_data(database, company_id)
+    return {"message": "Data generated successfully", "result": result}
+
+@app.post("/api/demo/reset")
+async def reset_demo_data():
+    import os
+    if os.path.exists(database.DB_PATH):
+        try:
+            os.remove(database.DB_PATH)
+        except:
+            pass
+    await database.init_db()
+    from backend.seed_demo import seed_demo_data
+    await seed_demo_data(database)
+    return {"message": "Database reset and re-seeded"}
 
 @app.get("/api/companies/{company_id}/transactions")
 async def list_transactions_endpoint(
     company_id: str,
     jurisdiction: Optional[str] = Query(None),
-    transaction_type: Optional[str] = Query(None),
-    limit: int = 100
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None)
 ):
-    from backend.data_access import get_transactions
-    txns = await get_transactions(company_id, jurisdiction, transaction_type, limit=limit)
+    txns = await database.get_bank_transactions(company_id, jurisdiction=jurisdiction, date_from=date_from, date_to=date_to)
     return txns
+
+@app.get("/api/companies/{company_id}/invoices")
+async def list_invoices_endpoint(
+    company_id: str,
+    jurisdiction: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None)
+):
+    invs = await database.get_invoices(company_id, jurisdiction=jurisdiction, date_from=date_from, date_to=date_to)
+    return invs
+
+@app.get("/api/companies/{company_id}/proposals")
+async def list_proposals_endpoint(
+    company_id: str,
+    status: Optional[str] = Query(None)
+):
+    status_list = status.split(",") if status else None
+    proposals = await database.get_match_proposals(company_id, status_list=status_list)
+    return proposals
+
+@app.post("/api/proposals/{proposal_id}/accept")
+async def accept_proposal_endpoint(proposal_id: str):
+    import aiosqlite
+    async with aiosqlite.connect(database.DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM match_proposals WHERE id = ?", (proposal_id,)) as cur:
+            row = await cur.fetchone()
+            if not row: raise HTTPException(status_code=404, detail="Not found")
+            proposal = dict(row)
+            
+        await db.execute("UPDATE match_proposals SET status = 'accepted' WHERE id = ?", (proposal_id,))
+        if proposal["transaction_id"]:
+            await db.execute("UPDATE bank_transactions SET reconciliation_status = 'approved', matched_invoice_id = ? WHERE id = ?", (proposal["invoice_id"], proposal["transaction_id"]))
+        if proposal["invoice_id"]:
+            await db.execute("UPDATE invoices SET reconciliation_status = 'approved', matched_transaction_id = ? WHERE id = ?", (proposal["transaction_id"], proposal["invoice_id"]))
+        await db.commit()
+    return {"message": "Accepted"}
+
+@app.patch("/api/proposals/{proposal_id}")
+async def update_proposal_endpoint(proposal_id: str, payload: dict = Body(...)):
+    import aiosqlite
+    async with aiosqlite.connect(database.DB_PATH) as db:
+        confidence = payload.get("confidence_score")
+        status = payload.get("status")
+        set_clause = []
+        params = []
+        if confidence is not None:
+            set_clause.append("confidence_score = ?")
+            params.append(float(confidence))
+        if status is not None:
+            set_clause.append("status = ?")
+            params.append(status)
+            
+        if set_clause:
+            query = f"UPDATE match_proposals SET {', '.join(set_clause)} WHERE id = ?"
+            params.append(proposal_id)
+            await db.execute(query, tuple(params))
+            await db.commit()
+    return {"message": "Proposal updated"}
+
+@app.post("/api/proposals/{proposal_id}/reject")
+async def reject_proposal_endpoint(proposal_id: str):
+    import aiosqlite
+    async with aiosqlite.connect(database.DB_PATH) as db:
+        await db.execute("UPDATE match_proposals SET status = 'rejected' WHERE id = ?", (proposal_id,))
+        await db.commit()
+    return {"message": "Rejected"}
+
+@app.post("/api/proposals/{proposal_id}/flag")
+async def flag_proposal_endpoint(proposal_id: str):
+    import aiosqlite
+    async with aiosqlite.connect(database.DB_PATH) as db:
+        await db.execute("UPDATE match_proposals SET status = 'needs_review' WHERE id = ?", (proposal_id,))
+        await db.commit()
+    return {"message": "Flagged"}
+
+@app.post("/api/companies/{company_id}/bulk-approve")
+async def bulk_approve_endpoint(company_id: str):
+    proposals = await database.get_match_proposals(company_id, status_list=["matched", "needs_review"])
+    approved = 0
+    for p in proposals:
+        if p.get("confidence_score", 0) >= 0.85:
+            await accept_proposal_endpoint(p["match_proposal"]["id"])
+            approved += 1
+    return {"message": f"Auto-approved {approved} proposals"}
+
+@app.post("/api/actions/{action_id}/auto-approve-transactions")
+async def auto_approve_action_transactions(action_id: str):
+    import aiosqlite
+    async with aiosqlite.connect(database.DB_PATH) as db:
+        await db.execute("UPDATE bank_transactions SET reconciliation_status = 'approved' WHERE reconciliation_status != 'approved'")
+        await db.commit()
+    return {"message": "All transactions approved"}
 
 @app.get("/api/companies/{company_id}/financials/{jurisdiction}/{period}")
 async def get_financial_summary_endpoint(company_id: str, jurisdiction: str, period: str):

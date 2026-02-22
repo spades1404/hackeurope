@@ -35,10 +35,14 @@ async def init_db():
             obligation_id TEXT,
             obligation_name TEXT,
             jurisdiction TEXT,
+            form TEXT,
             deadline DATE,
             prep_start_date DATE,
+            period_start DATE,
+            period_end DATE,
             status TEXT,
             priority TEXT,
+            output_type TEXT,
             document_id TEXT,
             action_data JSON,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -76,21 +80,80 @@ async def init_db():
         ''')
 
         await db.execute('''
-        CREATE TABLE IF NOT EXISTS transactions (
+        CREATE TABLE IF NOT EXISTS bank_transactions (
             id TEXT PRIMARY KEY,
-            company_id TEXT,
-            jurisdiction TEXT NOT NULL,
-            transaction_type TEXT NOT NULL,
-            category TEXT,
-            description TEXT,
+            company_id TEXT REFERENCES companies(id),
+            description TEXT NOT NULL,
             amount REAL NOT NULL,
             currency TEXT NOT NULL,
             transaction_date DATE NOT NULL,
-            quarter TEXT,
-            tax_relevant BOOLEAN DEFAULT TRUE,
+            value_date DATE,
+            account_name TEXT,
+            account_iban TEXT,
+            jurisdiction TEXT,
+            category TEXT,
+            counterparty_name TEXT,
+            payment_reference TEXT,
+            reconciliation_status TEXT DEFAULT 'unreconciled',
+            matched_invoice_id TEXT,
             metadata JSON,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY(company_id) REFERENCES companies(id)
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+
+        await db.execute('''
+        CREATE TABLE IF NOT EXISTS invoices (
+            id TEXT PRIMARY KEY,
+            company_id TEXT REFERENCES companies(id),
+            invoice_number TEXT NOT NULL,
+            invoice_date DATE NOT NULL,
+            due_date DATE,
+            vendor_name TEXT NOT NULL,
+            vendor_address TEXT,
+            vendor_tax_id TEXT,
+            vendor_iban TEXT,
+            buyer_name TEXT,
+            net_amount REAL NOT NULL,
+            vat_rate REAL,
+            vat_amount REAL,
+            gross_amount REAL NOT NULL,
+            currency TEXT NOT NULL,
+            payment_reference TEXT,
+            jurisdiction TEXT,
+            line_items JSON,
+            source_email_id TEXT,
+            source_email_from TEXT,
+            source_email_subject TEXT,
+            source_email_date TIMESTAMP,
+            source_filename TEXT,
+            pdf_base64 TEXT,
+            reconciliation_status TEXT DEFAULT 'unreconciled',
+            matched_transaction_id TEXT,
+            metadata JSON,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+
+        await db.execute('''
+        CREATE TABLE IF NOT EXISTS match_proposals (
+            id TEXT PRIMARY KEY,
+            transaction_id TEXT REFERENCES bank_transactions(id),
+            invoice_id TEXT,
+            email_id TEXT,
+            confidence_score REAL,
+            status TEXT DEFAULT 'pending',
+            amount_match BOOLEAN,
+            date_match BOOLEAN,
+            vendor_match BOOLEAN,
+            reference_match BOOLEAN,
+            iban_match BOOLEAN,
+            match_reasons JSON,
+            gmail_query_used TEXT,
+            emails_found INTEGER,
+            error TEXT,
+            reviewed_by TEXT,
+            reviewed_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         ''')
 
@@ -358,3 +421,128 @@ async def get_chat_history(company_id: str, limit: int = 50):
         async with db.execute("SELECT * FROM chat_messages WHERE company_id = ? ORDER BY created_at ASC LIMIT ?", (company_id, limit)) as cursor:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
+
+async def create_generic_record(table: str, **kwargs):
+    async with aiosqlite.connect(DB_PATH) as db:
+        keys = list(kwargs.keys())
+        values = [json.dumps(v) if isinstance(v, (dict, list)) else v for v in kwargs.values()]
+        placeholders = ", ".join(["?"] * len(keys))
+        columns = ", ".join(keys)
+        await db.execute(f"INSERT INTO {table} ({columns}) VALUES ({placeholders})", values)
+        await db.commit()
+
+async def create_bank_transaction(**kwargs):
+    await create_generic_record("bank_transactions", **kwargs)
+
+async def create_invoice(**kwargs):
+    await create_generic_record("invoices", **kwargs)
+
+async def create_match_proposal(**kwargs):
+    await create_generic_record("match_proposals", **kwargs)
+
+async def create_action(**kwargs):
+    await create_generic_record("actions", **kwargs)
+
+async def update_reconciliation_status(table: str, record_id: str, status: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(f"UPDATE {table} SET reconciliation_status = ? WHERE id = ?", (status, record_id))
+        await db.commit()
+
+async def get_bank_transactions(company_id: str, **filters):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        query = "SELECT * FROM bank_transactions WHERE company_id = ?"
+        params = [company_id]
+        
+        for k, v in filters.items():
+            if v is not None:
+                if k == "date_from":
+                    query += " AND transaction_date >= ?"
+                    params.append(v)
+                elif k == "date_to":
+                    query += " AND transaction_date <= ?"
+                    params.append(v)
+                else:
+                    query += f" AND {k} = ?"
+                    params.append(v)
+        
+        async with db.execute(query + " ORDER BY transaction_date DESC", params) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+async def get_invoices(company_id: str, **filters):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        query = "SELECT * FROM invoices WHERE company_id = ?"
+        params = [company_id]
+        
+        for k, v in filters.items():
+            if v is not None:
+                if k == "date_from":
+                    query += " AND invoice_date >= ?"
+                    params.append(v)
+                elif k == "date_to":
+                    query += " AND invoice_date <= ?"
+                    params.append(v)
+                else:
+                    query += f" AND {k} = ?"
+                    params.append(v)
+
+        async with db.execute(query + " ORDER BY invoice_date DESC", params) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+async def get_match_proposals(company_id: str, status_list: list = None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        query = "SELECT mp.*, t.currency as currency FROM match_proposals mp JOIN bank_transactions t ON mp.transaction_id = t.id WHERE t.company_id = ?"
+        params = [company_id]
+        if status_list:
+            placeholders = ",".join(["?"] * len(status_list))
+            query += f" AND mp.status IN ({placeholders})"
+            params.extend(status_list)
+        
+        async with db.execute(query + " ORDER BY mp.created_at DESC", params) as cursor:
+            rows = await cursor.fetchall()
+            proposals = [dict(row) for row in rows]
+            
+            for p in proposals:
+                if isinstance(p.get("match_reasons"), str):
+                    try:
+                        p["match_reasons"] = json.loads(p["match_reasons"])
+                    except:
+                        p["match_reasons"] = []
+                        
+                if p.get("invoice_id"):
+                    async with db.execute("SELECT * FROM invoices WHERE id = ?", (p["invoice_id"],)) as ic:
+                        inv_row = await ic.fetchone()
+                        if inv_row:
+                            inv = dict(inv_row)
+                            p["extracted_invoice"] = {
+                                "invoice_number": inv.get("invoice_number"),
+                                "invoice_date": inv.get("invoice_date"),
+                                "due_date": inv.get("due_date"),
+                                "vendor_name": inv.get("vendor_name"),
+                                "vendor_address": inv.get("vendor_address"),
+                                "vendor_tax_id": inv.get("vendor_tax_id"),
+                                "vendor_iban": inv.get("vendor_iban"),
+                                "buyer_name": inv.get("buyer_name"),
+                                "net_amount": inv.get("net_amount"),
+                                "vat_rate": inv.get("vat_rate"),
+                                "vat_amount": inv.get("vat_amount"),
+                                "gross_amount": inv.get("gross_amount"),
+                                "payment_reference": inv.get("payment_reference"),
+                                "line_items": json.loads(inv.get("line_items")) if inv.get("line_items") else []
+                            }
+            
+            results = []
+            for p in proposals:
+                results.append({
+                    "transaction_id": p["transaction_id"],
+                    "status": p["status"],
+                    "confidence_score": p.get("confidence_score"),
+                    "match_proposal": p,
+                    "currency": p.get("currency"),
+                    "error": p.get("error")
+                })
+            return results

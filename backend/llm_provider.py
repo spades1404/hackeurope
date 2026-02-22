@@ -41,7 +41,7 @@ PROVIDER_DEFAULTS = {
 }
 
 def get_provider() -> str:
-    return os.getenv("LLM_PROVIDER", "ollama").lower()
+    return os.getenv("LLM_PROVIDER", "gemini").lower()
 
 def get_model(vision: bool = False) -> str:
     provider = get_provider()
